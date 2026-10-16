@@ -1,0 +1,28 @@
+# Optional: add this container to your nginx Deployment (spec.template.spec.containers) to export
+# nginx stub_status as Prometheus metrics. nginx must expose stub_status, e.g.:
+#   server { listen 8081; location = /stub_status { stub_status; access_log off; } }
+# Then apply the PodMonitor below.
+#
+#        - name: nginx-exporter
+#          image: docker.io/nginx/nginx-prometheus-exporter:1.5.1
+#          args: ["--nginx.scrape-uri=http://127.0.0.1:8081/stub_status"]
+#          ports:
+#            - { name: nginx-metrics, containerPort: 9113 }
+#          resources:
+#            requests: { cpu: 5m, memory: 16Mi }
+#            limits: { cpu: 50m, memory: 32Mi }
+#          securityContext:
+#            allowPrivilegeEscalation: false
+#            readOnlyRootFilesystem: true
+#            capabilities: { drop: ["ALL"] }
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: app-frontend, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [${APP_NAMESPACE}] }
+  selector: { matchLabels: { app.kubernetes.io/name: ${FRONTEND_APP} } }
+  podMetricsEndpoints:
+    - port: nginx-metrics
+      interval: 15s
+      relabelings:
+        - { sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], targetLabel: app }

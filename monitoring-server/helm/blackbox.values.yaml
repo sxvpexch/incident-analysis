@@ -1,0 +1,18 @@
+# External ("outside-in") checks: load the site like a user every 10s from the monitoring server.
+fullnameOverride: blackbox
+config:
+  modules:
+    site_page:            # the page must return 200 AND contain the expected text
+      prober: http
+      timeout: 4s
+      http:
+        preferred_ip_protocol: ip4
+        valid_status_codes: [200]
+        fail_if_body_not_matches_regexp: ['${SITE_PAGE_REGEX}']
+    site_api:             # the API through the ingress must return real data
+      prober: http
+      timeout: 4s
+      http:
+        preferred_ip_protocol: ip4
+        valid_status_codes: [200]
+        fail_if_body_not_matches_regexp: ['${SITE_API_REGEX}']

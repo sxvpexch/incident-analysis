@@ -1,0 +1,37 @@
+# App cluster: Prometheus in agent mode (scrape + remote-write only, no local storage/alerting),
+# plus kube-state-metrics and node-exporter. Everything is shipped to the monitoring server.
+fullnameOverride: agent
+defaultRules: { create: false }
+alertmanager: { enabled: false }
+grafana: { enabled: false, forceDeployDashboards: false }
+kubeEtcd: { enabled: false }        # etcd metrics listen on 127.0.0.1 only
+kubeProxy: { enabled: false }       # kube-proxy metrics listen on 127.0.0.1 only
+kubeControllerManager:
+  enabled: true
+  endpoints: [${APP_NODE_IP}]
+  service: { port: 10257, targetPort: 10257 }
+  serviceMonitor: { https: true, insecureSkipVerify: true }
+kubeScheduler:
+  enabled: true
+  endpoints: [${APP_NODE_IP}]
+  service: { port: 10259, targetPort: 10259 }
+  serviceMonitor: { https: true, insecureSkipVerify: true }
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - pods=[app.kubernetes.io/name,app.kubernetes.io/version]
+    - deployments=[app.kubernetes.io/name]
+prometheus-node-exporter:
+  hostNetwork: true
+prometheus:
+  agentMode: true
+  prometheusSpec:
+    scrapeInterval: 15s
+    externalLabels: { cluster: ${CLUSTER_NAME} }
+    remoteWrite:
+      - url: http://${MONITORING_SERVER_IP}:30090/api/v1/write
+        queueConfig: { maxSamplesPerSend: 5000, capacity: 20000 }
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 1Gi }

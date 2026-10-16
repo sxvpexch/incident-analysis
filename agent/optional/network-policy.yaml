@@ -1,0 +1,15 @@
+# Only needed if your application namespace denies ingress by default.
+# Lets the Prometheus agent (namespace "monitoring") reach the metrics ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-monitoring-scrape, namespace: ${APP_NAMESPACE} }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+      ports:
+        - { port: ${API_METRICS_PORT} }   # API /metrics (named port)
+        - { port: 9113 }                  # nginx-prometheus-exporter sidecar (optional)
+        - { port: 9187 }                  # postgres-exporter (optional)

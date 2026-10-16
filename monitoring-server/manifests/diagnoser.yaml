@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: diagnoser
+  namespace: ai
+  labels: { app.kubernetes.io/name: diagnoser }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: diagnoser }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: diagnoser }
+      annotations: { code-hash: "CODE_HASH" }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: diagnoser
+          image: python:3.13-slim
+          command: ["python", "-u", "/app/diagnoser.py"]
+          ports: [{ name: http, containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: diagnoser-config }
+          env:
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+          readinessProbe: { httpGet: { path: /healthz, port: http } }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 30 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts:
+            - { name: code, mountPath: /app }
+            - { name: app-cluster, mountPath: /var/run/app-cluster, readOnly: true }
+            - { name: smtp, mountPath: /var/run/smtp, readOnly: true }
+      volumes:
+        - name: code
+          configMap: { name: diagnoser-code }
+        - name: app-cluster
+          secret: { secretName: app-cluster-reader }
+        - name: smtp
+          secret: { secretName: smtp-credentials }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: diagnoser
+  namespace: ai
+  labels: { app.kubernetes.io/name: diagnoser }
+spec:
+  selector: { app.kubernetes.io/name: diagnoser }
+  ports: [{ name: http, port: 8080, targetPort: http }]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: diagnoser
+  namespace: ai
+spec:
+  selector: { matchLabels: { app.kubernetes.io/name: diagnoser } }
+  endpoints: [{ port: http, path: /metrics, interval: 30s }]

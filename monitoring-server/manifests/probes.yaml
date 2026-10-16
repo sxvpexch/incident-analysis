@@ -1,0 +1,26 @@
+# Outside-in checks: the monitoring server loads the site like a user every 5s.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata: { name: site-page, namespace: monitoring }
+spec:
+  interval: 5s
+  scrapeTimeout: 4s
+  module: site_page
+  prober: { url: blackbox.monitoring.svc:9115 }
+  targets:
+    staticConfig:
+      static: [${SITE_PAGE_URL}]
+      labels: { cluster: ${CLUSTER_NAME}, namespace: ${APP_NAMESPACE}, check: page }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata: { name: site-api, namespace: monitoring }
+spec:
+  interval: 5s
+  scrapeTimeout: 4s
+  module: site_api
+  prober: { url: blackbox.monitoring.svc:9115 }
+  targets:
+    staticConfig:
+      static: [${SITE_API_URL}]
+      labels: { cluster: ${CLUSTER_NAME}, namespace: ${APP_NAMESPACE}, check: api }

@@ -1,0 +1,118 @@
+# Monitoring server: Prometheus (receives remote-write from the app cluster's agent), Alertmanager, Grafana.
+fullnameOverride: kps
+defaultRules:
+  create: false            # the generic upstream rules are what make alerts vague; ours live in rules.yaml
+kubeEtcd: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }
+
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090        # remote-write endpoint for the app cluster: http://${MONITORING_SERVER_IP}:30090/api/v1/write
+  prometheusSpec:
+    enableRemoteWriteReceiver: true
+    evaluationInterval: 15s
+    retention: 15d
+    retentionSize: 18GB
+    externalUrl: https://${GRAFANA_HOST}/explore
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits: { memory: 4Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: 20Gi } }
+
+alertmanager:
+  alertmanagerSpec:
+    secrets: [smtp-credentials]          # mounted at /etc/alertmanager/secrets/smtp-credentials/
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources: { requests: { storage: 1Gi } }
+  config:
+    global:
+      smtp_smarthost: ${SMTP_HOST}:${SMTP_PORT}
+      smtp_from: "incident-analysis <${SMTP_USER}>"
+      smtp_auth_username: ${SMTP_USER}
+      smtp_auth_password_file: /etc/alertmanager/secrets/smtp-credentials/password
+      smtp_require_tls: true
+    route:
+      receiver: ai-diagnoser
+      # One email per incident: everything firing in a namespace is diagnosed together,
+      # so "latency + CPU throttling" arrives as one root cause instead of two vague alerts.
+      group_by: [cluster, namespace]
+      group_wait: 5s
+      group_interval: 1m
+      repeat_interval: 4h
+      routes:
+        - receiver: "null"
+          matchers: [alertname="Watchdog"]
+        # If the AI pipeline itself is broken, email directly so nothing is lost.
+        - receiver: email-direct
+          matchers: [alertname=~"AIDiagnoserDown|OllamaDown|AppClusterTelemetryMissing"]
+    inhibit_rules:
+      - source_matchers: [alertname="PodCrashLooping"]
+        target_matchers: [alertname=~"PodRestartingFrequently|DeploymentReplicasUnavailable|ApiHighErrorRate|TraefikHighErrorRate"]
+        equal: [cluster, namespace]
+      - source_matchers: [alertname="ContainerOOMKilled"]
+        target_matchers: [alertname=~"PodRestartingFrequently|ContainerMemoryNearLimit"]
+        equal: [cluster, namespace, pod]
+    receivers:
+      - name: "null"
+      - name: ai-diagnoser
+        webhook_configs:
+          - url: http://diagnoser.ai.svc:8080/alertmanager
+            send_resolved: true
+            timeout: 10s
+      - name: email-direct
+        email_configs:
+          - to: "${ALERT_EMAIL_TO}"
+            send_resolved: true
+
+grafana:
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence: { enabled: true, size: 2Gi }
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/router.tls: "true"
+    hosts: [${GRAFANA_HOST}]
+    tls:
+      - secretName: grafana-tls
+        hosts: [${GRAFANA_HOST}]
+  grafana.ini:
+    server: { root_url: "https://${GRAFANA_HOST}" }
+    users: { allow_sign_up: false }
+    auth.anonymous: { enabled: false }
+    analytics: { reporting_enabled: false, check_for_updates: false }
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+      multicluster:            # adds a "cluster" picker to the bundled Kubernetes dashboards
+        global: { enabled: true }
+    datasources:
+      defaultDatasourceEnabled: true
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      url: http://loki.monitoring.svc:3100
+      access: proxy
+      jsonData: { maxLines: 1000 }

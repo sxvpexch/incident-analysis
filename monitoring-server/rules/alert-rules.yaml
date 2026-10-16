@@ -1,0 +1,238 @@
+# Alert rules for the application cluster (data arrives via remote-write with cluster="${CLUSTER_NAME}").
+# Each alert carries a `component` label and a specific summary; the AI diagnoser groups everything
+# firing in a namespace and works out the root cause with evidence.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: incident-analysis
+  namespace: monitoring
+spec:
+  groups:
+    - name: app.api
+      rules:
+        - alert: ApiHighErrorRate
+          expr: |
+            (
+              sum by (cluster, namespace) (rate(http_requests_total{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}",status=~"5.."}[2m]))
+              / sum by (cluster, namespace) (rate(http_requests_total{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}"}[2m]))
+            ) > 0.05
+            and sum by (cluster, namespace) (rate(http_requests_total{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}"}[2m])) > 0.05
+          for: 30s
+          labels: { severity: critical, component: api }
+          annotations:
+            summary: "API 5xx ratio is {{ $value | humanizePercentage }} (threshold 5%)"
+        - alert: ApiHighLatency
+          expr: |
+            histogram_quantile(0.95, sum by (cluster, namespace, le) (
+              rate(http_request_duration_seconds_bucket{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}",route!~"${EXCLUDE_ROUTES}"}[3m])
+            )) > 1
+          for: 1m
+          labels: { severity: warning, component: api }
+          annotations:
+            summary: "API p95 latency is {{ $value | humanizeDuration }} (threshold 1s)"
+        - alert: ApiNoReadyPods
+          expr: kube_deployment_status_replicas_available{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}",deployment="${API_DEPLOYMENT}"} == 0
+          for: 30s
+          labels: { severity: critical, component: api }
+          annotations:
+            summary: "No ${API_DEPLOYMENT} pods are available: the API is down"
+
+    - name: app.database
+      rules:
+        - alert: DbQueriesSlow
+          expr: |
+            histogram_quantile(0.95, sum by (cluster, namespace, query, le) (
+              rate(db_query_duration_seconds_bucket{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}"}[3m])
+            )) > 0.25
+          for: 1m
+          labels: { severity: warning, component: database }
+          annotations:
+            summary: "DB query {{ $labels.query }} p95 is {{ $value | humanizeDuration }} (threshold 250ms)"
+        - alert: DbPoolSaturated
+          expr: sum by (cluster, namespace) (db_pool_connections{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}",state="waiting"}) > 0
+          for: 1m
+          labels: { severity: warning, component: database }
+          annotations:
+            summary: "{{ $value }} requests are waiting for a DB connection from the pool"
+        - alert: DbQueryErrors
+          expr: sum by (cluster, namespace, query) (rate(db_errors_total{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}"}[3m])) > 0
+          for: 30s
+          labels: { severity: warning, component: database }
+          annotations:
+            summary: "DB query {{ $labels.query }} is failing ({{ $value | humanize }}/s)"
+        - alert: PostgresDown
+          expr: pg_up{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}"} == 0
+          for: 30s
+          labels: { severity: critical, component: database }
+          annotations:
+            summary: "postgres-exporter cannot connect to Postgres"
+        - alert: PostgresLongRunningQueries
+          expr: max by (cluster, namespace) (max_over_time(pg_stat_activity_max_tx_duration{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}",state="active"}[2m])) > 0.5
+          for: 1m
+          labels: { severity: warning, component: database }
+          annotations:
+            summary: "Postgres has active transactions running for {{ $value | humanizeDuration }}"
+
+    - name: app.workloads
+      rules:
+        - alert: ContainerOOMKilled
+          expr: |
+            max by (cluster, namespace, pod, container) (kube_pod_container_status_last_terminated_reason{cluster="${CLUSTER_NAME}",reason="OOMKilled"}) == 1
+            and on (cluster, namespace, pod, container)
+            increase(kube_pod_container_status_restarts_total{cluster="${CLUSTER_NAME}"}[10m]) > 0
+          labels: { severity: critical, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} was OOMKilled and restarted"
+        - alert: ContainerMemoryNearLimit
+          expr: |
+            max by (cluster, namespace, pod, container) (container_memory_working_set_bytes{cluster="${CLUSTER_NAME}",container!="",container!="POD"})
+            / max by (cluster, namespace, pod, container) (kube_pod_container_resource_limits{cluster="${CLUSTER_NAME}",resource="memory"}) > 0.8
+          for: 30s
+          labels: { severity: warning, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} is at {{ $value | humanizePercentage }} of its memory limit"
+        - alert: ContainerCpuThrottled
+          expr: |
+            sum by (cluster, namespace, pod, container) (rate(container_cpu_cfs_throttled_periods_total{cluster="${CLUSTER_NAME}",container!=""}[3m]))
+            / sum by (cluster, namespace, pod, container) (rate(container_cpu_cfs_periods_total{cluster="${CLUSTER_NAME}",container!=""}[3m])) > 0.25
+            # ignore short bursts of tiny sidecars/exporters: the container must also be using >50% of its CPU limit
+            and on (cluster, namespace, pod, container)
+            sum by (cluster, namespace, pod, container) (rate(container_cpu_usage_seconds_total{cluster="${CLUSTER_NAME}",container!=""}[3m]))
+            / max by (cluster, namespace, pod, container) (kube_pod_container_resource_limits{cluster="${CLUSTER_NAME}",resource="cpu"}) > 0.5
+          for: 1m
+          labels: { severity: warning, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} is CPU-throttled in {{ $value | humanizePercentage }} of periods"
+        - alert: PodCrashLooping
+          expr: max by (cluster, namespace, pod, container) (kube_pod_container_status_waiting_reason{cluster="${CLUSTER_NAME}",reason="CrashLoopBackOff"}) == 1
+          for: 30s
+          labels: { severity: critical, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} is in CrashLoopBackOff"
+        - alert: PodImagePullFailing
+          # no "reason" in by(): the pod flips ErrImagePull <-> ImagePullBackOff, which would reset the pending timer
+          expr: max by (cluster, namespace, pod, container) (kube_pod_container_status_waiting_reason{cluster="${CLUSTER_NAME}",reason=~"ErrImagePull|ImagePullBackOff|InvalidImageName"}) == 1
+          for: 30s
+          labels: { severity: critical, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} cannot pull its image (ErrImagePull/ImagePullBackOff)"
+        - alert: PodRestartingFrequently
+          expr: increase(kube_pod_container_status_restarts_total{cluster="${CLUSTER_NAME}"}[15m]) >= 2
+          labels: { severity: warning, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}/{{ $labels.container }} restarted {{ $value | humanize }} times in 15m"
+        - alert: PodNotReady
+          expr: |
+            max by (cluster, namespace, pod) (kube_pod_status_ready{cluster="${CLUSTER_NAME}",condition="false"}) == 1
+            and on (cluster, namespace, pod) max by (cluster, namespace, pod) (kube_pod_status_phase{cluster="${CLUSTER_NAME}",phase="Running"}) == 1
+          for: 2m
+          labels: { severity: warning, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }} is Running but not Ready"
+        - alert: DeploymentReplicasUnavailable
+          expr: kube_deployment_status_replicas_unavailable{cluster="${CLUSTER_NAME}"} > 0
+          for: 2m
+          labels: { severity: warning, component: workload }
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} has {{ $value }} unavailable replica(s)"
+        - alert: StatefulSetNotReady
+          expr: kube_statefulset_status_replicas_ready{cluster="${CLUSTER_NAME}"} < kube_statefulset_replicas{cluster="${CLUSTER_NAME}"}
+          for: 1m
+          labels: { severity: critical, component: database }
+          annotations:
+            summary: "StatefulSet {{ $labels.statefulset }} has fewer ready replicas than desired"
+
+    - name: app.edge
+      rules:
+        - alert: TraefikHighErrorRate
+          expr: |
+            (
+              sum by (cluster, service) (rate(traefik_service_requests_total{cluster="${CLUSTER_NAME}",service=~"${APP_NAMESPACE}-.*",code=~"5.."}[2m]))
+              / sum by (cluster, service) (rate(traefik_service_requests_total{cluster="${CLUSTER_NAME}",service=~"${APP_NAMESPACE}-.*"}[2m]))
+            ) > 0.05
+            and sum by (cluster, service) (rate(traefik_service_requests_total{cluster="${CLUSTER_NAME}",service=~"${APP_NAMESPACE}-.*"}[2m])) > 0.05
+          for: 30s
+          labels: { severity: critical, component: edge, namespace: ${APP_NAMESPACE} }
+          annotations:
+            summary: "Traefik sees {{ $value | humanizePercentage }} 5xx for {{ $labels.service }}"
+        - alert: FrontendNginxDown
+          expr: nginx_up{cluster="${CLUSTER_NAME}"} == 0
+          for: 30s
+          labels: { severity: critical, component: frontend }
+          annotations:
+            summary: "nginx in {{ $labels.pod }} is not answering stub_status"
+        - alert: CertificateExpiringSoon
+          expr: (certmanager_certificate_expiration_timestamp_seconds{cluster="${CLUSTER_NAME}"} - time()) < 14 * 86400
+          for: 10m
+          labels: { severity: warning, component: edge }
+          annotations:
+            summary: "Certificate {{ $labels.name }} expires in {{ $value | humanizeDuration }}"
+        - alert: CertificateNotReady
+          expr: certmanager_certificate_ready_status{cluster="${CLUSTER_NAME}",condition="False"} == 1
+          for: 10m
+          labels: { severity: warning, component: edge }
+          annotations:
+            summary: "Certificate {{ $labels.name }} is not Ready (renewal failing?)"
+
+    - name: app.synthetic
+      interval: 5s             # evaluated faster than the other groups: this is what users see
+      rules:
+        # Failed liveness/readiness/startup probes, straight from the kubelet (a healthy boot fails at most 1-2 times)
+        - alert: PodProbesFailing
+          expr: |
+            sum by (cluster, namespace, pod, container, probe_type) (
+              increase(prober_probe_total{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}",result="failed"}[1m])
+            ) >= 5
+          labels: { severity: critical, component: workload }
+          annotations:
+            summary: "{{ $labels.pod }}: {{ $labels.probe_type }} probe failed {{ $value | humanize }} times in 1m"
+        - alert: SiteCheckFailing
+          expr: probe_success{cluster="${CLUSTER_NAME}",namespace="${APP_NAMESPACE}"} == 0
+          for: 10s
+          labels: { severity: critical, component: edge }
+          annotations:
+            summary: "External check of {{ $labels.instance }} is failing: users cannot use this page"
+
+    - name: app.node
+      rules:
+        - alert: NodeMemoryPressure
+          expr: (1 - node_memory_MemAvailable_bytes{cluster="${CLUSTER_NAME}"} / node_memory_MemTotal_bytes{cluster="${CLUSTER_NAME}"}) > 0.9
+          for: 5m
+          labels: { severity: warning, component: node, namespace: ${APP_NAMESPACE} }
+          annotations:
+            summary: "App node memory usage is {{ $value | humanizePercentage }}"
+        - alert: NodeCpuSaturated
+          expr: 1 - avg by (cluster, instance) (rate(node_cpu_seconds_total{cluster="${CLUSTER_NAME}",mode="idle"}[5m])) > 0.9
+          for: 10m
+          labels: { severity: warning, component: node, namespace: ${APP_NAMESPACE} }
+          annotations:
+            summary: "App node CPU usage is {{ $value | humanizePercentage }}"
+        - alert: NodeDiskFilling
+          expr: |
+            (1 - node_filesystem_avail_bytes{cluster="${CLUSTER_NAME}",mountpoint="/",fstype!~"tmpfs|overlay"}
+                 / node_filesystem_size_bytes{cluster="${CLUSTER_NAME}",mountpoint="/",fstype!~"tmpfs|overlay"}) > 0.85
+          for: 10m
+          labels: { severity: warning, component: node, namespace: ${APP_NAMESPACE} }
+          annotations:
+            summary: "App node root disk is {{ $value | humanizePercentage }} full"
+
+    - name: monitoring.pipeline
+      rules:
+        - alert: AppClusterTelemetryMissing
+          expr: absent_over_time(up{cluster="${CLUSTER_NAME}",job="kube-state-metrics"}[3m])
+          for: 1m
+          labels: { severity: critical, component: monitoring, namespace: ${APP_NAMESPACE} }
+          annotations:
+            summary: "No metrics from the app cluster for several minutes: Prometheus agent, network or firewall is broken"
+        - alert: AIDiagnoserDown
+          expr: absent(up{job="diagnoser"} == 1)
+          for: 2m
+          labels: { severity: critical, component: monitoring, namespace: ai }
+          annotations:
+            summary: "The AI diagnoser is down; alerts are being emailed without diagnosis"
+        - alert: OllamaDown
+          expr: absent(kube_deployment_status_replicas_available{cluster="",namespace="ai",deployment="ollama"} == 1)
+          for: 2m
+          labels: { severity: critical, component: monitoring, namespace: ai }
+          annotations:
+            summary: "Ollama is down; diagnoses fall back to rule-based analysis"

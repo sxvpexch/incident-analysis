@@ -1,0 +1,46 @@
+# Read-only identity the AI diagnoser on the monitoring server uses against this cluster's API
+# (https://${APP_NODE_IP}:6443). It can read workloads, events and logs, and nothing else:
+# no secrets, no configmaps, no write verbs.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: ai-reader, namespace: monitoring }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-reader-token
+  namespace: monitoring
+  annotations: { kubernetes.io/service-account.name: ai-reader }
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: ai-reader }
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, nodes, services, endpoints, namespaces, persistentvolumeclaims, persistentvolumes]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets, controllerrevisions]
+    verbs: [get, list]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates, certificaterequests]
+    verbs: [get, list]
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods, nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: ai-reader }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: ai-reader }
+subjects: [{ kind: ServiceAccount, name: ai-reader, namespace: monitoring }]

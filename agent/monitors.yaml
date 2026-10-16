@@ -1,0 +1,38 @@
+# What the Prometheus agent scrapes besides the Kubernetes defaults (kubelet, cAdvisor, probes,
+# kube-state-metrics, node-exporter, API server, controller-manager, scheduler, CoreDNS).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: app-api, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [${APP_NAMESPACE}] }
+  selector: { matchLabels: { app.kubernetes.io/name: ${API_APP} } }
+  podMetricsEndpoints:
+    - port: ${API_METRICS_PORT}
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - { sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_name], targetLabel: app }
+        - { sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_version], targetLabel: app_version }
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: traefik, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [${INGRESS_CONTROLLER_NAMESPACE}] }
+  selector: { matchLabels: { app.kubernetes.io/name: traefik } }
+  podMetricsEndpoints: [{ port: metrics, interval: 15s }]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: cert-manager, namespace: monitoring }
+spec:
+  namespaceSelector: { matchNames: [cert-manager] }
+  selector: { matchLabels: { app.kubernetes.io/component: controller, app.kubernetes.io/name: cert-manager } }
+  podMetricsEndpoints: [{ port: http-metrics, interval: 60s }]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata: { name: vector, namespace: monitoring }
+spec:
+  selector: { matchLabels: { app.kubernetes.io/name: vector } }
+  podMetricsEndpoints: [{ port: prom-exporter, interval: 30s }]

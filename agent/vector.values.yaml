@@ -1,0 +1,79 @@
+# Vector DaemonSet: ships every container log (app JSON logs, Traefik access logs, Kubernetes
+# events from the event exporter) to Loki on the monitoring server.
+role: Agent
+tolerations:
+  - { operator: Exists }
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 512Mi }
+podLabels:
+  app.kubernetes.io/name: vector
+service:
+  ports:
+    - { name: prom-exporter, port: 9090, protocol: TCP }
+containerPorts:
+  - { name: prom-exporter, containerPort: 9090, protocol: TCP }
+customConfig:
+  data_dir: /vector-data-dir
+  api: { enabled: false }
+  sources:
+    k8s_logs:
+      type: kubernetes_logs
+      glob_minimum_cooldown_ms: 1000
+    vector_metrics:
+      type: internal_metrics
+  transforms:
+    parsed:
+      type: remap
+      inputs: [k8s_logs]
+      source: |
+        .namespace = .kubernetes.pod_namespace
+        .pod = .kubernetes.pod_name
+        .container = .kubernetes.container_name
+        .node = .kubernetes.pod_node_name
+        .app = .kubernetes.pod_labels."app.kubernetes.io/name"
+        if !is_string(.app) { .app = .kubernetes.container_name }
+        .source = "container"
+        .level = "info"
+        msg = to_string(.message) ?? ""
+        parsed, err = parse_json(msg)
+        if err == null && is_object(parsed) {
+          if is_string(parsed.level) {
+            .level = downcase(string!(parsed.level))
+          } else if exists(parsed.DownstreamStatus) {
+            # Traefik JSON access log
+            st = to_int(parsed.DownstreamStatus) ?? 0
+            .level = if st >= 500 { "error" } else if st >= 400 { "warning" } else { "info" }
+          }
+          # Kubernetes events from the event exporter: index them under the namespace they are about
+          if .app == "event-exporter" {
+            .source = "k8s-event"
+            if is_string(parsed.involvedObject.namespace) { .namespace = parsed.involvedObject.namespace }
+            .level = if parsed.type == "Warning" { "warning" } else { "info" }
+          }
+        } else if match(msg, r'(?i)\b(error|fatal|panic)\b') {
+          .level = "error"
+        } else if match(msg, r'(?i)\bwarn') {
+          .level = "warning"
+        }
+  sinks:
+    loki:
+      type: loki
+      inputs: [parsed]
+      endpoint: http://${MONITORING_SERVER_IP}:30100
+      encoding: { codec: text }
+      out_of_order_action: accept
+      remove_label_fields: false
+      labels:
+        cluster: ${CLUSTER_NAME}
+        namespace: "{{`{{ namespace }}`}}"
+        app: "{{`{{ app }}`}}"
+        container: "{{`{{ container }}`}}"
+        pod: "{{`{{ pod }}`}}"
+        level: "{{`{{ level }}`}}"
+        source: "{{`{{ source }}`}}"
+      buffer: { type: disk, max_size: 536870912, when_full: block }
+    prom_exporter:
+      type: prometheus_exporter
+      inputs: [vector_metrics]
+      address: 0.0.0.0:9090

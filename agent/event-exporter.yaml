@@ -1,0 +1,65 @@
+# Writes every Kubernetes event as one JSON line to stdout; Vector ships it to Loki.
+# Events normally vanish from the API after 1h; this keeps them for the AI and Grafana.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: event-exporter, namespace: monitoring }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: event-exporter }
+rules:
+  - apiGroups: ["", "events.k8s.io"]
+    resources: [events]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods]          # the exporter looks up the involved pod's labels
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: event-exporter }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: event-exporter }
+subjects: [{ kind: ServiceAccount, name: event-exporter, namespace: monitoring }]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: event-exporter, namespace: monitoring }
+data:
+  config.yaml: |
+    logLevel: error
+    logFormat: json
+    maxEventAgeSeconds: 60
+    route:
+      routes:
+        - match: [{ receiver: stdout }]
+    receivers:
+      - name: stdout
+        stdout: { deDot: true }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-exporter
+  namespace: monitoring
+  labels: { app.kubernetes.io/name: event-exporter }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app.kubernetes.io/name: event-exporter } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: event-exporter }
+    spec:
+      serviceAccountName: event-exporter
+      securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: event-exporter
+          image: ghcr.io/resmoio/kubernetes-event-exporter:v1.7
+          args: ["-conf=/data/config.yaml"]
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          volumeMounts: [{ name: cfg, mountPath: /data }]
+      volumes:
+        - name: cfg
+          configMap: { name: event-exporter }

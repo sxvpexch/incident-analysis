@@ -1,0 +1,6 @@
+# local configuration and credentials: never commit
+config.env
+secrets/
+*.bak*
+__pycache__/
+*.pyc
