@@ -102,7 +102,7 @@ Tested against a three-tier demo app (nginx → FastAPI → Postgres) on a singl
 **You need:** an application Kubernetes cluster you can `kubectl` into, and one Linux VM for monitoring (8 vCPU / 32 GB RAM / 50 GB disk recommended; no GPU required) in the same network, plus a DNS name for Grafana and an SMTP account (e.g. Gmail with an app password).
 
 ```bash
-git clone https://github.com/<you>/incident-analysis && cd incident-analysis
+git clone https://github.com/sxvpexch/incident-analysis && cd incident-analysis
 cp config.example.env config.env       # edit: namespace, IPs, domain, email, site URLs
 ```
 
